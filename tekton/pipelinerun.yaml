@@ -1,0 +1,32 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  generateName: blog-app-pipeline-run-
+  namespace: tekton-pipelines
+spec:
+  serviceAccountName: pipeline-account
+  pipelineRef:
+    name: blog-app-pipeline
+  # Updated podTemplate with comprehensive security context
+  workspaces:
+    - name: shared-workspace
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+    - name: docker-credentials
+      secret:
+        secretName: docker-credentials
+    - name: ssh-directory
+      secret:
+        secretName: github-ssh-key
+  params:
+    - name: git-url
+      value: git@github.com:Suraj-kumar00/blog-app-gitops.git
+    - name: image-name
+      value: surajkumar00/blog-app
+    - name: gitops-repo
+      value: git@github.com:Suraj-kumar00/blog-app-gitops.git

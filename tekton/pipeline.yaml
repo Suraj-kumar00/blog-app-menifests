@@ -1,0 +1,222 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: blog-app-pipeline
+  namespace: tekton-pipelines
+spec:
+  workspaces:
+    - name: shared-workspace
+    - name: docker-credentials
+    - name: ssh-directory
+      description: SSH directory with private key for Git
+
+  params:
+    - name: git-url
+      type: string
+      description: Git repository URL
+      default: git@github.com:Suraj-kumar00/blog-app-gitops.git
+    - name: git-revision
+      type: string
+      description: Git revision to checkout
+      default: main
+    - name: image-name
+      type: string
+      description: Name of the image to build
+      default: surajkumar00/blog-app
+    - name: gitops-repo
+      type: string
+      description: The GitOps repository URL
+      default: git@github.com:Suraj-kumar00/blog-app-gitops.git
+    - name: gitops-branch
+      type: string
+      description: The GitOps repository branch
+      default: main
+    - name: manifest-path
+      type: string
+      description: Path to the k8s manifest to update
+      default: kubernetes/*
+
+  tasks:
+    - name: fetch-repository
+      taskRef:
+        name: git-clone
+        kind: Task
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+        - name: ssh-directory
+          workspace: ssh-directory
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+        - name: depth
+          value: "1"
+        - name: verbose
+          value: "true"
+        - name: subdirectory
+          value: "source"
+        - name: deleteExisting
+          value: "true"
+
+    - name: generate-tag
+      runAfter:
+        - fetch-repository
+      taskSpec:
+        steps:
+          - name: generate
+            image: alpine/git:latest
+            securityContext:
+              allowPrivilegeEscalation: false
+              runAsNonRoot: true
+              capabilities:
+                drop:
+                  - "ALL"
+            script: |
+              cd $(workspaces.output.path)/source
+              COMMIT_SHA=$(git rev-parse --short HEAD)
+              TIMESTAMP=$(date +%Y%m%d%H%M%S)
+              echo -n "${COMMIT_SHA}-${TIMESTAMP}" > $(results.tag.path)
+        results:
+          - name: tag
+            description: The generated unique image tag
+        workspaces:
+          - name: output
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+
+    - name: build-and-push
+      taskRef:
+        name: kaniko
+        kind: Task
+      runAfter:
+        - generate-tag
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+        - name: dockerconfig
+          workspace: docker-credentials
+      params:
+        - name: IMAGE
+          value: $(params.image-name):$(tasks.generate-tag.results.tag)
+        - name: CONTEXT
+          value: $(workspaces.source.path)/source
+        - name: DOCKERFILE
+          value: ./Dockerfile
+
+    - name: fetch-gitops-repo
+      runAfter:
+        - build-and-push
+      taskRef:
+        name: git-clone
+        kind: Task
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+        - name: ssh-directory
+          workspace: ssh-directory
+      params:
+        - name: url
+          value: $(params.gitops-repo)
+        - name: revision
+          value: $(params.gitops-branch)
+        - name: verbose
+          value: "true"
+        - name: subdirectory
+          value: "gitops"
+        - name: deleteExisting
+          value: "true"
+
+    - name: update-gitops-manifest
+      runAfter:
+        - fetch-gitops-repo
+      taskSpec:
+        workspaces:
+          - name: source
+        params:
+          - name: image-name
+            type: string
+          - name: image-tag
+            type: string
+          - name: manifest-path
+            type: string
+        steps:
+          - name: update-yaml
+            image: bitnami/kubectl:latest
+            securityContext:
+              allowPrivilegeEscalation: false
+              runAsNonRoot: true
+              capabilities:
+                drop:
+                  - "ALL"
+            workingDir: $(workspaces.source.path)/gitops
+            script: |
+              #!/usr/bin/env bash
+              set -e
+
+              echo "Updating image tag in $(params.manifest-path)"
+
+              sed -i "s|image: $(params.image-name):.*|image: $(params.image-name):$(params.image-tag)|g" "$(params.manifest-path)"
+
+              cat $(params.manifest-path)
+
+              echo "Updated manifest with new image tag: $(params.image-tag)"
+
+          - name: git-commit
+            image: alpine/git:latest
+            securityContext:
+              allowPrivilegeEscalation: false
+              runAsNonRoot: true
+              capabilities:
+                drop:
+                  - "ALL"
+            workingDir: $(workspaces.source.path)/gitops
+            script: |
+              #!/usr/bin/env bash
+              set -e
+
+              git config --global user.email "tekton@tekton.dev"
+              git config --global user.name "Tekton Pipeline"
+
+              mkdir -p ~/.ssh
+              echo "StrictHostKeyChecking no" > ~/.ssh/config
+              chmod 600 ~/.ssh/config
+              cp /root/.ssh/id_rsa* ~/.ssh/ || true
+
+              git add $(params.manifest-path)
+
+              if ! git diff-index --quiet HEAD; then
+                git commit -m "Update image tag to $(params.image-tag)"
+                git push origin HEAD:$(params.gitops-branch)
+                echo "Pushed changes to GitOps repository"
+              else
+                echo "No changes to commit"
+              fi
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: image-name
+          value: $(params.image-name)
+        - name: image-tag
+          value: $(tasks.generate-tag.results.tag)
+        - name: manifest-path
+          value: $(params.manifest-path)
+
+  finally:
+    - name: cleanup
+      taskSpec:
+        steps:
+          - name: report-status
+            image: alpine:latest
+            securityContext:
+              allowPrivilegeEscalation: false
+              runAsNonRoot: true
+              capabilities:
+                drop:
+                  - "ALL"
+            script: |
+              echo "Pipeline has completed execution."
+              echo "Check ArgoCD for deployment status."
