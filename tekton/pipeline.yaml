@@ -1,20 +1,18 @@
-apiVersion: tekton.dev/v1beta1
+apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
   name: blog-app-pipeline
   namespace: tekton-pipelines
 spec:
-  workspaces:
-    - name: shared-workspace
-    - name: docker-credentials
-    - name: ssh-directory
-      description: SSH directory with private key for Git
-
+  description: |
+    This pipeline fetches source code, generates a unique tag, builds and
+    pushes a Docker image, updates a GitOps repository with the new image tag,
+    and performs cleanup.
   params:
     - name: git-url
       type: string
       description: Git repository URL
-      default: git@github.com:Suraj-kumar00/blog-app-gitops.git
+      default: https://github.com/Suraj-kumar00/blog-app-gitops
     - name: git-revision
       type: string
       description: Git revision to checkout
@@ -26,26 +24,29 @@ spec:
     - name: gitops-repo
       type: string
       description: The GitOps repository URL
-      default: git@github.com:Suraj-kumar00/blog-app-gitops.git
+      default: https://github.com/Suraj-kumar00/blog-app-menifests.git
     - name: gitops-branch
       type: string
       description: The GitOps repository branch
       default: main
     - name: manifest-path
       type: string
-      description: Path to the k8s manifest to update
+      description: Path to the k8s manifest to update (e.g., kubernetes/deployment.yaml)
       default: kubernetes/*
-
+  workspaces:
+    - name: shared-workspace
+    - name: docker-credentials
+    - name: basic-auth
   tasks:
     - name: fetch-repository
       taskRef:
-        name: git-clone
+        name: git-clone-secure # Assuming you have this custom Task
         kind: Task
       workspaces:
         - name: output
           workspace: shared-workspace
-        - name: ssh-directory
-          workspace: ssh-directory
+        - name: basic-auth
+          workspace: basic-auth
       params:
         - name: url
           value: $(params.git-url)
@@ -73,6 +74,8 @@ spec:
               capabilities:
                 drop:
                   - "ALL"
+              seccompProfile:
+                type: RuntimeDefault
             script: |
               cd $(workspaces.output.path)/source
               COMMIT_SHA=$(git rev-parse --short HEAD)
@@ -89,7 +92,7 @@ spec:
 
     - name: build-and-push
       taskRef:
-        name: kaniko
+        name: kaniko-secure # Assuming you have this custom Task
         kind: Task
       runAfter:
         - generate-tag
@@ -110,13 +113,13 @@ spec:
       runAfter:
         - build-and-push
       taskRef:
-        name: git-clone
+        name: git-clone-secure # Assuming you have this custom Task
         kind: Task
       workspaces:
         - name: output
           workspace: shared-workspace
-        - name: ssh-directory
-          workspace: ssh-directory
+        - name: basic-auth
+          workspace: basic-auth
       params:
         - name: url
           value: $(params.gitops-repo)
@@ -151,6 +154,8 @@ spec:
               capabilities:
                 drop:
                   - "ALL"
+              seccompProfile:
+                type: RuntimeDefault
             workingDir: $(workspaces.source.path)/gitops
             script: |
               #!/usr/bin/env bash
@@ -158,11 +163,11 @@ spec:
 
               echo "Updating image tag in $(params.manifest-path)"
 
-              sed -i "s|image: $(params.image-name):.*|image: $(params.image-name):$(params.image-tag)|g" "$(params.manifest-path)"
-
-              cat $(params.manifest-path)
-
-              echo "Updated manifest with new image tag: $(params.image-tag)"
+              find "$(params.manifest-path)" -type f -print0 | while IFS= read -r -d $'\0' file; do
+                sed -i "s|image: $(params.image-name):.*|image: $(params.image-name):$(params.image-tag)|g" "$file"
+                cat "$file"
+                echo "Updated manifest: $file with new image tag: $(params.image-tag)"
+              done
 
           - name: git-commit
             image: alpine/git:latest
@@ -172,6 +177,8 @@ spec:
               capabilities:
                 drop:
                   - "ALL"
+              seccompProfile:
+                type: RuntimeDefault
             workingDir: $(workspaces.source.path)/gitops
             script: |
               #!/usr/bin/env bash
@@ -183,16 +190,15 @@ spec:
               mkdir -p ~/.ssh
               echo "StrictHostKeyChecking no" > ~/.ssh/config
               chmod 600 ~/.ssh/config
-              cp /root/.ssh/id_rsa* ~/.ssh/ || true
 
-              git add $(params.manifest-path)
+              git add "$(params.manifest-path)"
 
               if ! git diff-index --quiet HEAD; then
                 git commit -m "Update image tag to $(params.image-tag)"
                 git push origin HEAD:$(params.gitops-branch)
                 echo "Pushed changes to GitOps repository"
               else
-                echo "No changes to commit"
+                echo "No changes to commit in GitOps repository"
               fi
       workspaces:
         - name: source
@@ -204,7 +210,6 @@ spec:
           value: $(tasks.generate-tag.results.tag)
         - name: manifest-path
           value: $(params.manifest-path)
-
   finally:
     - name: cleanup
       taskSpec:
@@ -217,6 +222,8 @@ spec:
               capabilities:
                 drop:
                   - "ALL"
+              seccompProfile:
+                type: RuntimeDefault
             script: |
-              echo "Pipeline has completed execution."
+              echo "Pipeline execution completed."
               echo "Check ArgoCD for deployment status."

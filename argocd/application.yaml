@@ -6,7 +6,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: git@github.com:Suraj-kumar00/blog-app-gitops.git
+    repoURL: https://github.com/Suraj-kumar00/blog-app-menifests.git
     targetRevision: HEAD
     path: kubernetes
   destination:

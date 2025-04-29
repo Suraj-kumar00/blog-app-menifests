@@ -42,12 +42,12 @@ kubectl get tasks -n tekton-pipelines
 
 ## Step 3: Configure Authentication Secrets
 
-### GitHub Authentication Secret
+### GitHub Authentication Secret (Personal Access Token)
 
-Create a secret for GitHub authentication:
+Create a secret for GitHub authentication using a Personal Access Token (PAT):
 
-1. Create a GitHub Personal Access Token with `repo` permissions
-2. Create a Secret YAML file (github-credentials.yaml):
+1. Create a GitHub Personal Access Token with `repo` permissions (Settings > Developer settings > Personal access tokens).
+2. Create a Secret YAML file (`github-credentials.yaml`):
 
 ```yaml
 apiVersion: v1
@@ -56,11 +56,19 @@ metadata:
   name: github-credentials
   namespace: tekton-pipelines
   annotations:
-    tekton.dev/git-0: https://github.com # This annotation is important
+    tekton.dev/git-0: https://github.com
+    tekton.dev/git-1: github.com
+    tekton.dev/git-2: git@github.com
+    tekton.dev/git-3: https://github.com/Suraj-kumar00/blog-app-menifests.git
+    tekton.dev/git-4: https://github.com/Suraj-kumar00/blog-app-gitops.git
+  labels:
+    app.kubernetes.io/managed-by: tekton-pipelines
+    app.kubernetes.io/name: github-credentials
+    app.kubernetes.io/part-of: blog-app-pipeline
 type: kubernetes.io/basic-auth
 stringData:
-  username: your-github-username
-  password: your-github-personal-access-token
+  username: <your-github-username>
+  password: <your-personal-access-token>
 ```
 
 3. Apply the secret:
@@ -105,7 +113,7 @@ kubectl apply -f tekton/docker-credentials.yaml
 
 Create a ServiceAccount that has access to the GitHub and Docker Hub secrets:
 
-1. Create a ServiceAccount YAML file (pipeline-serviceaccount.yaml):
+1. Create a ServiceAccount YAML file (`pipeline-serviceaccount.yaml`):
 
 ```yaml
 apiVersion: v1
@@ -115,6 +123,8 @@ metadata:
   namespace: tekton-pipelines
 secrets:
   - name: github-credentials
+  - name: docker-credentials
+imagePullSecrets:
   - name: docker-credentials
 ```
 
@@ -140,6 +150,8 @@ spec:
   workspaces:
     - name: shared-workspace
     - name: docker-credentials
+    - name: basic-auth
+      description: Basic auth credentials for Git (GitHub PAT)
   params:
     - name: git-url
       type: string
@@ -161,7 +173,7 @@ spec:
     - name: fetch-repository
       taskRef:
         name: git-clone
-        kind: Task # Important: Use Task, not ClusterTask
+        kind: Task
       workspaces:
         - name: output
           workspace: shared-workspace
@@ -174,6 +186,18 @@ spec:
           value: "1"
         - name: verbose
           value: "true"
+
+    - name: fetch-gitops-repo
+      runAfter:
+        - build-and-push
+      taskRef:
+        name: git-clone
+        kind: Task
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+        - name: basic-auth
+          workspace: basic-auth
 
     - name: build-and-push
       taskRef:
@@ -229,6 +253,9 @@ spec:
     - name: docker-credentials
       secret:
         secretName: docker-credentials
+    - name: basic-auth
+      secret:
+        secretName: github-credentials
   params:
     - name: git-url
       value: https://github.com/Suraj-kumar00/blog-app-gitops.git
@@ -313,6 +340,21 @@ kubectl port-forward -n tekton-pipelines svc/tekton-dashboard 9097:9097
 
 1. Tekton has moved to GitHub Container Registry (ghcr.io)
 2. Make sure you're using the latest installation commands from the official documentation
+
+## Troubleshooting PodSecurity Errors
+
+If you see errors like `violates PodSecurity "restricted:latest"`, ensure every step in your Pipeline and Task specs includes the following `securityContext`:
+
+```yaml
+securityContext:
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - "ALL"
+  seccompProfile:
+    type: RuntimeDefault
+```
 
 ## Best Practices
 

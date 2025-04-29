@@ -7,6 +7,6 @@ metadata:
     argocd.argoproj.io/secret-type: repository
 stringData:
   type: git
-  url: git@github.com:Suraj-kumar00/blog-app-gitops.git
+  url: https://github.com/Suraj-kumar00/blog-app-menifests.git
   username: Suraj-kumar00
   password: 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
